@@ -2,9 +2,23 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
-        android:label="IT之家去广告"
+        android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.ITHomeAdKill"
         android:allowBackup="false">
+
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+            </intent-filter>
+        </activity>
 
         <!-- Xposed / LSPosed 模块声明 -->
         <meta-data
@@ -12,11 +26,12 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="隐藏IT之家信息流广告卡、置顶卡、事件日历与WebView推广卡" />
+            android:value="关闭IT之家信息流广告、置顶、网页推广及文章打赏红包区域" />
         <meta-data
             android:name="xposedminversion"
-            android:value="82" />
-        <!-- 作用域：IT之家 -->
+            android:value="93" />
+        <meta-data android:name="xposedsharedprefs" android:value="true" />
+        <!-- Recommended scope: IT之家 -->
         <meta-data
             android:name="xposedscope"
             android:resource="@array/xposed_scope" />
