@@ -222,8 +222,8 @@ class SettingsStoreConcurrencyTest {
 
     @Test
     fun concurrentLegacyReloadsPerformOnlyOneMigrationWithoutCreatingAWriter() {
-        listOf(false, true).forEach { eventCalendar ->
-            val storage = SharedStorage(legacyPreferences(eventCalendar)).apply { readDelayMillis = 10L }
+        legacySettingsSnapshots().forEach { legacy ->
+            val storage = SharedStorage(legacy).apply { readDelayMillis = 10L }
             val first = storage.store()
             val second = storage.store()
 
@@ -232,7 +232,7 @@ class SettingsStoreConcurrencyTest {
             assertEquals(0, storage.writerCreations.get())
             assertEquals(1, storage.writes.size)
             assertEquals(42L, storage.snapshot()!!.revision)
-            assertEquals(2, storage.values["settings_schema"])
+            assertEquals(3, storage.values["settings_schema"])
             assertFalse(storage.values.containsKey("hide_event_calendar"))
             assertEquals(first.settings, second.settings)
         }
@@ -241,7 +241,8 @@ class SettingsStoreConcurrencyTest {
     @Test
     fun concurrentLegacyMigrationAndRewardMutationPreserveEveryOtherRawValue() {
         repeat(10) { iteration ->
-            val legacy = legacyPreferences(iteration % 2 == 0)
+            val snapshots = legacySettingsSnapshots()
+            val legacy = snapshots[iteration % snapshots.size]
             val storage = SharedStorage(legacy).apply { readDelayMillis = 2L }
             val first = storage.store()
             val second = storage.store()
@@ -249,14 +250,14 @@ class SettingsStoreConcurrencyTest {
             runTogether({ first.reload() }, { second.setToggle(Toggle.ARTICLE_REWARDS, true) })
 
             val expected = (legacy - "hide_event_calendar") + mapOf(
-                "settings_schema" to 2,
+                "settings_schema" to 3,
                 "settings_revision" to 41L + storage.writes.size,
                 "hide_article_rewards" to true,
             )
             assertEquals("iteration=$iteration", expected, storage.values)
             assertTrue(storage.writes.size in 1..2)
             assertTrue(storage.writes.all {
-                it["settings_schema"] == 2 && !it.containsKey("hide_event_calendar")
+                it["settings_schema"] == 3 && !it.containsKey("hide_event_calendar")
             })
             assertEquals(0, storage.writerCreations.get())
         }
@@ -264,41 +265,45 @@ class SettingsStoreConcurrencyTest {
 
     @Test
     fun failedPendingMigrationCannotOverwriteAnotherStoresNewerRewardChoice() {
-        val storage = SharedStorage(legacyPreferences()).apply { commitSucceeds = false }
-        val first = storage.store()
-        assertNull(first.reload().settings)
-        storage.commitSucceeds = true
-        val second = storage.store()
-        second.reload()
-        val newer = second.setToggle(Toggle.ARTICLE_REWARDS, true).settings!!
-        val writesBeforeRetry = storage.writes.size
+        legacySettingsSnapshots().forEach { legacy ->
+            val storage = SharedStorage(legacy).apply { commitSucceeds = false }
+            val first = storage.store()
+            assertNull(first.reload().settings)
+            storage.commitSucceeds = true
+            val second = storage.store()
+            second.reload()
+            val newer = second.setToggle(Toggle.ARTICLE_REWARDS, legacy["hide_article_rewards"] != true).settings!!
+            val writesBeforeRetry = storage.writes.size
 
-        assertEquals(newer, first.reload().settings)
-        assertEquals(newer, storage.snapshot())
-        assertEquals(writesBeforeRetry, storage.writes.size)
-        assertEquals(43L, newer.revision)
+            assertEquals(newer, first.reload().settings)
+            assertEquals(newer, storage.snapshot())
+            assertEquals(writesBeforeRetry, storage.writes.size)
+            assertEquals(43L, newer.revision)
+        }
     }
 
     @Test
     fun anotherStoreMustConfirmAFailedMigrationBeforePublishingItsMemorySnapshot() {
-        val storage = SharedStorage(legacyPreferences()).apply { commitSucceeds = false }
-        val first = storage.store()
-        assertNull(first.reload().settings)
-        val second = storage.store()
+        legacySettingsSnapshots().forEach { legacy ->
+            val storage = SharedStorage(legacy).apply { commitSucceeds = false }
+            val first = storage.store()
+            assertNull(first.reload().settings)
+            val second = storage.store()
 
-        val failedAgain = second.reload()
+            val failedAgain = second.reload()
 
-        assertNull(failedAgain.settings)
-        assertTrue(failedAgain.message.contains("失败"))
-        assertEquals(2, storage.writes.size)
-        assertEquals(storage.writes[0], storage.writes[1])
-        storage.commitSucceeds = true
-        val rebuilt = storage.store()
-        val recovered = rebuilt.reload()
-        assertEquals(3, storage.writes.size)
-        assertEquals(42L, recovered.settings!!.revision)
-        assertEquals(storage.writes[0], storage.writes[2])
-        assertEquals(recovered.settings, storage.snapshot())
+            assertNull(failedAgain.settings)
+            assertTrue(failedAgain.message.contains("失败"))
+            assertEquals(2, storage.writes.size)
+            assertEquals(storage.writes[0], storage.writes[1])
+            storage.commitSucceeds = true
+            val rebuilt = storage.store()
+            val recovered = rebuilt.reload()
+            assertEquals(3, storage.writes.size)
+            assertEquals(42L, recovered.settings!!.revision)
+            assertEquals(storage.writes[0], storage.writes[2])
+            assertEquals(recovered.settings, storage.snapshot())
+        }
     }
 
     @Test
@@ -342,6 +347,33 @@ class SettingsStoreConcurrencyTest {
         assertEquals(migrated, healthy.snapshot())
         assertNull(failed.store().reload().settings)
         assertEquals(2, failed.writes.size)
+    }
+
+    @Test
+    fun concurrentLegacyMigrationAndAiChoicePreserveOtherValuesAndSequentialRevisions() {
+        legacySettingsSnapshots().forEach { legacy ->
+            repeat(10) { iteration ->
+                val storage = SharedStorage(legacy).apply { readDelayMillis = 2L }
+                val first = storage.store()
+                val second = storage.store()
+
+                runTogether({ first.reload() }, { second.setToggle(Toggle.AI_SUMMARY, false) })
+
+                val expected = (legacy - "hide_event_calendar") + mapOf(
+                    "settings_schema" to 3,
+                    "settings_revision" to 41L + storage.writes.size,
+                    "hide_article_rewards" to (legacy["hide_article_rewards"] ?: false),
+                    "hide_article_ai_summary" to false,
+                )
+                assertEquals("iteration=$iteration schema=${legacy["settings_schema"]}", expected, storage.values)
+                assertTrue(storage.writes.size in 1..2)
+                assertEquals((0 until storage.writes.size).map { 42L + it }, storage.writes.map { it["settings_revision"] })
+                assertTrue(storage.writes.all { it["settings_schema"] == 3 && !it.containsKey("hide_event_calendar") })
+                assertEquals(0, storage.writerCreations.get())
+                assertFalse(storage.snapshot()!!.raw(Toggle.AI_SUMMARY))
+                assertFalse(storage.snapshot()!!.enabled(Toggle.AI_SUMMARY))
+            }
+        }
     }
 
     private fun runTogether(first: () -> Unit, second: () -> Unit) {

@@ -13,11 +13,9 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.webkit.WebView
 import android.widget.TextView
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
 import io.github.ghsssss.ithomeadkill.settings.Toggle
+import io.github.libxposed.api.XposedModule
 import java.lang.ref.WeakReference
-import java.lang.reflect.Method
 import java.util.WeakHashMap
 
 internal fun entryName(view: View): String = try {
@@ -47,24 +45,26 @@ internal fun hasSuperclass(view: View, name: String): Boolean {
 }
 
 /** UI-thread owner. All views, listeners and activities retained here are weak. */
-internal class HostRuntime {
+internal class HostRuntime(
+    module: XposedModule,
+    private val hooks: ModernHooks,
+    private val moduleLog: (String) -> Unit,
+    private val hostLoader: ClassLoader,
+) {
     private val main = Handler(Looper.getMainLooper())
     private val screens = WeakHashMap<Activity, Screen>()
     private val hidden = WeakHashMap<View, Hidden>()
     private val refreshListeners = WeakHashMap<View, WeakReference<Any>>()
-    private val hookedRefreshMethods = mutableSetOf<Method>()
-    private val hookedClients = mutableSetOf<Method>()
+
     private val webVersions = WeakHashMap<WebView, String>()
     private val schedule = RefreshSchedule()
-    private val preferences = HostPreferences { sweepAll(); startTick() }
+    private val preferences = HostPreferences(module, moduleLog, ::settingsChanged)
     private val logged = mutableSetOf<String>()
     private var mutating = false
     private var ticking = false
     private var lastTouch = 0L
     private var touching = false
-    private val hookedBindMethods = mutableSetOf<Method>()
-    private val hookedPagerMethods = mutableSetOf<Method>()
-    private val hookedRefreshCallbacks = mutableSetOf<Method>()
+
     private val pagerIdle = WeakHashMap<View, Boolean>()
 
     private class Hidden(view: View) {
@@ -86,7 +86,8 @@ internal class HostRuntime {
 
     fun attach(context: Context) {
         preferences.reload(true)
-        installRefreshHook(context.classLoader)
+        installRefreshHook(hostLoader)
+        if (context.classLoader !== hostLoader) installRefreshHook(context.classLoader)
     }
 
     fun resumed(activity: Activity) {
@@ -183,19 +184,16 @@ internal class HostRuntime {
     fun webClient(client: Any) {
         var type: Class<*>? = client.javaClass
         while (type != null) {
-            val method = type.declaredMethods.firstOrNull {
-                it.name == "onPageFinished" && it.parameterTypes.contentEquals(arrayOf(WebView::class.java, String::class.java))
-            }
+            val current = type
+            val method = runCatching {
+                current.getDeclaredMethod("onPageFinished", WebView::class.java, String::class.java)
+            }.getOrNull()
             if (method != null) {
-                if (hookedClients.add(method)) {
-                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            val view = param.args[0] as? WebView ?: return
-                            webVersions.remove(view)
-                            articleStyle(view)
-                        }
-                    })
-                }
+                hooks.observe(method, after = { chain ->
+                    val view = chain.args[0] as? WebView ?: return@observe
+                    webVersions.remove(view)
+                    articleStyle(view)
+                })
                 return
             }
             type = type.superclass
@@ -223,6 +221,11 @@ internal class HostRuntime {
     }
 
     private fun sweepAll() { screens.values.toList().forEach(::requestSweep) }
+
+    private fun settingsChanged() {
+        sweepAll()
+        startTick()
+    }
 
     private fun sweep(screen: Screen) {
         val activity = screen.activity.get() ?: return
@@ -351,70 +354,61 @@ internal class HostRuntime {
 
     private fun installRecyclerHook(loader: ClassLoader?) {
         if (loader == null) return
-        val type = runCatching { Class.forName("androidx.recyclerview.widget.RecyclerView\$Adapter", false, loader) }.getOrNull() ?: return
-        val method = type.declaredMethods.firstOrNull { it.name == "bindViewHolder" && it.parameterCount == 2 } ?: return
-        if (!hookedBindMethods.add(method)) return
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val holder = param.args[0] ?: return
-                val view = runCatching { holder.javaClass.getField("itemView").get(holder) as? View }.getOrNull() ?: return
-                fun release(part: View) {
-                    setHidden(part, false)
-                    if (part is ViewGroup && part !is WebView) for (i in 0 until part.childCount) release(part.getChildAt(i))
-                }
-                release(view)
+        val method = runCatching {
+            val type = Class.forName("androidx.recyclerview.widget.RecyclerView\$Adapter", false, loader)
+            val holder = Class.forName("androidx.recyclerview.widget.RecyclerView\$ViewHolder", false, loader)
+            type.getDeclaredMethod("bindViewHolder", holder, Int::class.javaPrimitiveType!!)
+        }.getOrNull() ?: return
+        val handle = hooks.observe(method, before = { chain ->
+            val holder = chain.args[0] ?: return@observe
+            val view = runCatching { holder.javaClass.getField("itemView").get(holder) as? View }.getOrNull() ?: return@observe
+            fun release(part: View) {
+                setHidden(part, false)
+                if (part is ViewGroup && part !is WebView) for (i in 0 until part.childCount) release(part.getChildAt(i))
             }
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val holder = param.args[0] ?: return
-                val view = runCatching { holder.javaClass.getField("itemView").get(holder) as? View }.getOrNull() ?: return
-                viewChanged(view)
-            }
+            release(view)
+        }, after = { chain ->
+            val holder = chain.args[0] ?: return@observe
+            val view = runCatching { holder.javaClass.getField("itemView").get(holder) as? View }.getOrNull() ?: return@observe
+            viewChanged(view)
         })
-        logOnce("recycler-bind", "recycler-bind-hook=ready")
+        if (handle != null) logOnce("recycler-bind", "recycler-bind-hook=ready")
     }
 
     private fun installPagerHooks(loader: ClassLoader?) {
         if (loader == null) return
         val type = runCatching { Class.forName("androidx.viewpager.widget.ViewPager", false, loader) }.getOrNull() ?: return
         for (method in type.declaredMethods.filter { it.name in setOf("setScrollState", "dispatchOnPageSelected") && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType)) }) {
-            if (!hookedPagerMethods.add(method)) continue
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val pager = param.thisObject as? View ?: return
-                    if (entryName(pager) != "viewPager") return
-                    if (method.name == "setScrollState") pagerIdle[pager] = param.args[0] == 0
-                    schedule.stop()
-                }
+            val handle = hooks.observe(method, before = { chain ->
+                val pager = chain.thisObject as? View ?: return@observe
+                if (entryName(pager) != "viewPager") return@observe
+                if (method.name == "setScrollState") pagerIdle[pager] = chain.args[0] == 0
+                schedule.stop()
             })
-            logOnce("pager:${method.name}", "pager-event-hook=${method.name}")
+            if (handle != null) logOnce("pager:${method.name}", "pager-event-hook=${method.name}")
         }
     }
 
     private fun trackRefreshListener(view: View, listener: Any?) {
         if (listener == null) { refreshListeners.remove(view); return }
         refreshListeners[view] = WeakReference(listener)
-        val method = listener.javaClass.methods.firstOrNull { it.name == "onRefresh" && it.parameterCount == 0 } ?: return
-        if (!hookedRefreshCallbacks.add(method)) return
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (refreshListeners.values.any { it.get() === param.thisObject }) schedule.stop()
-            }
+        val method = runCatching { listener.javaClass.getMethod("onRefresh") }.getOrNull() ?: return
+        hooks.observe(method, before = { chain ->
+            if (refreshListeners.values.any { it.get() === chain.thisObject }) schedule.stop()
         })
     }
 
     private fun installRefreshHook(loader: ClassLoader?) {
         if (loader == null) return
         val type = runCatching { Class.forName("com.iruanmi.multitypeadapter.MySwipeRefreshLayout", false, loader) }.getOrNull() ?: return
-        val method = type.methods.firstOrNull { it.name == "setOnRefreshListener" && it.parameterCount == 1
+        val candidate = type.methods.firstOrNull { it.name == "setOnRefreshListener" && it.parameterCount == 1
             && it.parameterTypes[0].methods.any { item -> item.name == "onRefresh" && item.parameterCount == 0 } } ?: return
-        if (!hookedRefreshMethods.add(method)) return
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val view = param.thisObject as? View ?: return
-                trackRefreshListener(view, param.args[0])
-            }
+        val method = type.getMethod("setOnRefreshListener", candidate.parameterTypes[0])
+        val handle = hooks.observe(method, after = { chain ->
+            val view = chain.thisObject as? View ?: return@observe
+            trackRefreshListener(view, chain.args[0])
         })
-        logOnce("refresh-api", "refresh-api=${method.declaringClass.name}.${method.name}")
+        if (handle != null) logOnce("refresh-api", "refresh-api=${method.declaringClass.name}.${method.name}")
     }
 
     private fun discoverRefreshListener(view: View) {

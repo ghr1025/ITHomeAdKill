@@ -33,7 +33,7 @@ data class ModuleSettings(
     fun enabled(toggle: Toggle): Boolean = raw(Toggle.MASTER) && raw(toggle)
 
     fun toPreferences(): Map<String, Any> = buildMap {
-        put(SettingsContract.SCHEMA_KEY, 2)
+        put(SettingsContract.SCHEMA_KEY, 3)
         put(SettingsContract.REVISION_KEY, revision)
         put(SettingsContract.WRITER_KEY, writerId)
         put(SettingsContract.REFRESH_KEY, autoRefreshMinutes)
@@ -47,20 +47,19 @@ data class ModuleSettings(
 
         fun fromPreferences(values: Map<String, *>): ModuleSettings? {
             val schema = values[SettingsContract.SCHEMA_KEY] as? Int ?: return null
-            if (schema != 1 && schema != 2) return null
+            if (schema != 1 && schema != 2 && schema != 3) return null
             val revision = values[SettingsContract.REVISION_KEY] as? Long ?: return null
             if (revision <= 0L) return null
             val writerId = values[SettingsContract.WRITER_KEY] as? String ?: return null
             if (!writerPattern.matches(writerId)) return null
             val minutes = values[SettingsContract.REFRESH_KEY] as? Int ?: return null
             if (minutes !in SettingsContract.REFRESH_MINUTES) return null
-            // 只兼容完整的旧快照；废弃值仍须通过类型校验，但不进入新模型。
+            // 只兼容完整的旧快照；schema 1 的废弃日历键仍须通过类型校验。
             if (schema == 1 && values["hide_event_calendar"] !is Boolean) return null
             val toggles = Toggle.values().associateWith {
-                if (schema == 1 && it == Toggle.ARTICLE_REWARDS) {
-                    false
-                } else {
-                    values[it.key] as? Boolean ?: return null
+                when {
+                    schema == 1 && it == Toggle.ARTICLE_REWARDS -> false
+                    else -> values[it.key] as? Boolean ?: return null
                 }
             }
             return ModuleSettings(writerId, revision, minutes, toggles)

@@ -11,98 +11,87 @@ import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.TextView
-import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
 import io.github.ghsssss.ithomeadkill.hook.HostRuntime
+import io.github.ghsssss.ithomeadkill.hook.ModernHookFlow
+import io.github.ghsssss.ithomeadkill.hook.ModernHookGate
+import io.github.ghsssss.ithomeadkill.hook.ModernHooks
 import io.github.ghsssss.ithomeadkill.hook.entryName
-import io.github.ghsssss.ithomeadkill.hook.moduleLog
+import io.github.ghsssss.ithomeadkill.hook.modernModuleLogger
+import io.github.libxposed.api.XposedInterface
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface
 
-/** Package/process-scoped hooks. No host data or network calls are modified. */
-class MainHook : IXposedHookLoadPackage {
-    override fun handleLoadPackage(param: XC_LoadPackage.LoadPackageParam) {
-        if (param.packageName != "com.ruanmei.ithome" || param.processName != param.packageName) return
-        val runtime = HostRuntime()
+/** Public no-argument modern entry. No framework calls occur during construction. */
+class MainHook : XposedModule() {
+    private val gate = ModernHookGate()
+    private val moduleLog = modernModuleLogger(this)
+    private var processName: String? = null
+    private var systemServer = false
+    private var runtimeApi = 0
+    private var hooks: ModernHooks? = null
+
+    override fun onModuleLoaded(param: XposedModuleInterface.ModuleLoadedParam) {
+        processName = param.processName
+        systemServer = param.isSystemServer
+        ModernHookFlow.safely({
+            runtimeApi = apiVersion
+            val remote = frameworkProperties and XposedInterface.PROP_CAP_REMOTE != 0L
+            moduleLog("module-loaded:process=$processName systemServer=$systemServer api=$runtimeApi " +
+                "framework=$frameworkName version=$frameworkVersion code=$frameworkVersionCode remote=$remote")
+        }, { error -> moduleLog("module-runtime-info-failed:${error.javaClass.simpleName}") })
+    }
+
+    override fun onPackageReady(param: XposedModuleInterface.PackageReadyParam) {
+        if (runtimeApi < XposedInterface.API_102) return
+        if (!gate.enter(param.packageName, param.isFirstPackage, processName, systemServer)) return
+        val installed = ModernHooks(this, moduleLog).also { hooks = it }
+        val runtime = HostRuntime(this, installed, moduleLog, param.classLoader)
         val main = Handler(Looper.getMainLooper())
-        fun install(name: String, block: () -> Unit) {
-            runCatching(block).onFailure { moduleLog("hook-install-failed:$name:${it.javaClass.simpleName}") }
-        }
-        install("Application.attach") {
-            XposedHelpers.findAndHookMethod(Application::class.java, "attach", Context::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val context = param.args[0] as? Context ?: return
-                        main.post { runtime.attach(context) }
-                    }
+        fun post(name: String, action: () -> Unit) {
+            main.post {
+                ModernHookFlow.safely(action, { error ->
+                    moduleLog("lifecycle-failed:$name:${error.javaClass.simpleName}")
                 })
+            }
         }
-        for (name in listOf("onResume", "onPause", "onDestroy")) install("Activity.$name") {
-            XposedBridge.hookAllMethods(Activity::class.java, name, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val activity = param.thisObject as? Activity ?: return
-                    when (name) {
-                        "onResume" -> main.post { runtime.resumed(activity) }
-                        "onPause" -> runtime.paused(activity)
-                        "onDestroy" -> runtime.destroyed(activity)
-                    }
+
+        installed.observe(Application::class.java, "attach", Context::class.java, after = { chain ->
+            val context = chain.args[0] as? Context ?: return@observe
+            post("attach") { runtime.attach(context) }
+        })
+        for (name in listOf("onResume", "onPause", "onDestroy")) {
+            installed.observe(Activity::class.java, name, after = { chain ->
+                val activity = chain.thisObject as? Activity ?: return@observe
+                when (name) {
+                    "onResume" -> post("resume") { runtime.resumed(activity) }
+                    "onPause" -> runtime.paused(activity)
+                    "onDestroy" -> runtime.destroyed(activity)
                 }
             })
         }
-        install("Activity.dispatchTouchEvent") {
-            XposedHelpers.findAndHookMethod(Activity::class.java, "dispatchTouchEvent", MotionEvent::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        (param.args[0] as? MotionEvent)?.let { runtime.touched(it.actionMasked) }
-                    }
-                })
-        }
-        install("TextView.setText") {
-            XposedHelpers.findAndHookMethod(TextView::class.java, "setText", CharSequence::class.java, TextView.BufferType::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val view = param.thisObject as? TextView ?: return
-                        if (entryName(view) in setOf("tv_small_tags", "tv_title", "tv_ad")) runtime.viewChanged(view)
-                    }
-                })
-        }
-        install("View.setVisibility") {
-            XposedHelpers.findAndHookMethod(View::class.java, "setVisibility", Int::class.javaPrimitiveType,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val view = param.thisObject as? View ?: return
-                        param.args[0] = runtime.desiredVisibility(view, param.args[0] as Int)
-                    }
-                })
-        }
-        install("View.setMinimumHeight") {
-            XposedHelpers.findAndHookMethod(View::class.java, "setMinimumHeight", Int::class.javaPrimitiveType,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val view = param.thisObject as? View ?: return
-                        param.args[0] = runtime.desiredMinimumHeight(view, param.args[0] as Int)
-                    }
-                })
-        }
-        install("View.setLayoutParams") {
-            XposedHelpers.findAndHookMethod(View::class.java, "setLayoutParams", ViewGroup.LayoutParams::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val view = param.thisObject as? View ?: return
-                        val params = param.args[0] as? ViewGroup.LayoutParams ?: return
-                        runtime.desiredLayout(view, params)
-                    }
-                })
-        }
-        install("WebView.setWebViewClient") {
-            XposedHelpers.findAndHookMethod(WebView::class.java, "setWebViewClient", WebViewClient::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        param.args[0]?.let(runtime::webClient)
-                    }
-                })
-        }
-        moduleLog("hooks-installed:main-process")
+        installed.observe(Activity::class.java, "dispatchTouchEvent", MotionEvent::class.java, before = { chain ->
+            (chain.args[0] as? MotionEvent)?.let { runtime.touched(it.actionMasked) }
+        })
+        installed.observe(TextView::class.java, "setText", CharSequence::class.java, TextView.BufferType::class.java, after = { chain ->
+            val view = chain.thisObject as? TextView ?: return@observe
+            if (entryName(view) in setOf("tv_small_tags", "tv_title", "tv_ad")) runtime.viewChanged(view)
+        })
+        installed.observe(View::class.java, "setVisibility", Int::class.javaPrimitiveType!!, arguments = { chain, copy ->
+            val view = chain.thisObject as? View ?: return@observe
+            copy[0] = runtime.desiredVisibility(view, copy[0] as Int)
+        })
+        installed.observe(View::class.java, "setMinimumHeight", Int::class.javaPrimitiveType!!, arguments = { chain, copy ->
+            val view = chain.thisObject as? View ?: return@observe
+            copy[0] = runtime.desiredMinimumHeight(view, copy[0] as Int)
+        })
+        installed.observe(View::class.java, "setLayoutParams", ViewGroup.LayoutParams::class.java, before = { chain ->
+            val view = chain.thisObject as? View ?: return@observe
+            val params = chain.args[0] as? ViewGroup.LayoutParams ?: return@observe
+            runtime.desiredLayout(view, params)
+        })
+        installed.observe(WebView::class.java, "setWebViewClient", WebViewClient::class.java, after = { chain ->
+            chain.args[0]?.let(runtime::webClient)
+        })
+        moduleLog("hooks-installed:main-process count=${installed.size} api=$runtimeApi")
     }
 }

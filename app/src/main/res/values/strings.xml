@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">IT之家去广告</string>
+    <string name="module_description">IT之家首页与文章净化，要求现代 Xposed API 102。</string>
     <string name="settings_title">IT之家去广告</string>
 
     <string name="settings_group_master">总开关</string>
@@ -28,5 +29,5 @@
 
     <string name="settings_loading_hint">正在载入已保存的选项，请稍候。</string>
     <string name="settings_unavailable_hint">暂时无法载入设置，请重新打开设置页重试。具体原因见上方状态。</string>
-    <string name="settings_usage_note">请在 LSPosed 中启用本模块，并勾选 IT之家作用域。保存后返回或重启 IT之家；设置页的保存状态不代表宿主已经生效。</string>
+    <string name="settings_usage_note">要求支持现代 API 102 的 LSPosed，并勾选 IT之家作用域。框架设置保存成功不代表宿主已经加载；保存后返回或重启 IT之家。</string>
 </resources>

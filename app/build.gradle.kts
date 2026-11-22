@@ -44,6 +44,7 @@ dependencies {
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.5-beta03")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.5-beta03")
     testImplementation("junit:junit:4.13.2")
-    // The Xposed API is supplied by LSPosed, never packaged in the module.
-    compileOnly("de.robv.android.xposed:api:82")
+    // API classes are supplied by the framework, the service client by this app.
+    compileOnly("io.github.libxposed:api:102.0.0")
+    implementation("io.github.libxposed:service:102.0.0")
 }

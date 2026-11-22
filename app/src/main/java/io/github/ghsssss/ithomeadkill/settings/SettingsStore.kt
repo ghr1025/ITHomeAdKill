@@ -43,6 +43,8 @@ internal class SettingsStore(
             val mayInitialize = firstRead
             firstRead = false
             val current = ModuleSettings.fromPreferences(values)
+            val needsMigration = values[SettingsContract.SCHEMA_KEY] == 1 ||
+                values[SettingsContract.SCHEMA_KEY] == 2
             val pending = pendingWrite
             val retryEmptyInitialization = values.isEmpty() && pending != null &&
                 pendingBase == null && pending.revision == 1L
@@ -51,14 +53,14 @@ internal class SettingsStore(
                     retryEmptyInitialization
                 )) {
                 // 只重试仍属本次失败写入的状态；其它实例的新提交绝不能被旧 pending 覆盖。
-                if (values[SettingsContract.SCHEMA_KEY] == 1) settings = null
+                if (needsMigration) settings = null
                 persist(pending, pendingBase)
             } else {
                 pendingWrite = null
                 pendingBase = null
                 if (values.isEmpty() && mayInitialize) {
                     persist(ModuleSettings.defaults(newWriterId()))
-                } else if (current != null && values[SettingsContract.SCHEMA_KEY] == 1) {
+                } else if (current != null && needsMigration) {
                     // 兼容解码不等于成功迁移；只有完整提交并回读后才向 UI 发布可用状态。
                     settings = null
                     if (current.revision == Long.MAX_VALUE) {
@@ -71,7 +73,7 @@ internal class SettingsStore(
                     if (current == null) {
                         result("设置数据无效或不完整，未覆盖原数据；请检查后重试")
                     } else {
-                        result("已读取本机设置；IT之家生效状态未核验")
+                        result("已读取框架设置；IT之家生效状态未核验")
                     }
                 }
             }
@@ -111,7 +113,8 @@ internal class SettingsStore(
             if (current == null) {
                 return@synchronized result("设置尚未成功读取，无法保存；请重试")
             }
-            val needsMigration = values[SettingsContract.SCHEMA_KEY] == 1
+            val needsMigration = values[SettingsContract.SCHEMA_KEY] == 1 ||
+                values[SettingsContract.SCHEMA_KEY] == 2
             settings = if (needsMigration) null else current
             val changed = change(current)
             if (changed == current && !needsMigration) {
@@ -138,7 +141,7 @@ internal class SettingsStore(
                 settings = next
                 pendingWrite = null
                 pendingBase = null
-                result("设置已保存到本机；IT之家生效状态未核验")
+                result("设置已保存到框架；IT之家生效状态未核验")
             }
         } catch (_: Exception) {
             result("保存设置失败，修改未确认写入；请重试")

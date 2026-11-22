@@ -9,7 +9,7 @@ import org.junit.Test
 
 class SettingsStoreTest {
     @Test
-    fun emptyStoreInitializesOneCompletePrivatePreferenceSnapshot() {
+    fun emptyStoreInitializesOneCompleteFrameworkPreferenceSnapshot() {
         val storage = MemoryStorage()
         val store = storage.store()
 
@@ -19,7 +19,8 @@ class SettingsStoreTest {
         assertEquals(state.settings, ModuleSettings.fromPreferences(storage.values))
         assertEquals(listOf(state.settings!!.toPreferences()), storage.writes)
         assertFalse(state.busy)
-        assertTrue(state.message.contains("本机"))
+        assertTrue(state.message.contains("框架"))
+        assertFalse(state.message.contains("本机"))
         assertFalse(state.message.contains("已激活"))
         assertFalse(state.message.contains("已生效"))
     }
@@ -55,7 +56,7 @@ class SettingsStoreTest {
             val storage = MemoryStorage(legacy)
             val store = storage.store()
             val expected = (legacy - "hide_event_calendar") + mapOf(
-                "settings_schema" to 2,
+                "settings_schema" to 3,
                 "settings_revision" to 42L,
                 "hide_article_rewards" to false,
             )
@@ -131,17 +132,15 @@ class SettingsStoreTest {
 
     @Test
     fun pendingRetryAgainstLegacyIsUnavailableUntilMigrationIsConfirmed() {
-        val original = ModuleSettings.defaults(WRITER).toPreferences()
+        val legacy = legacyPreferences() + ("hide_ad_cards" to true)
+        val original = ModuleSettings.fromPreferences(legacy)!!.toPreferences()
         val storage = MemoryStorage(original)
         val store = storage.store()
         store.reload()
         storage.commitSucceeds = false
         storage.keepOldValues = true
         store.setToggle(Toggle.AD_CARDS, false)
-        storage.values = (original - "hide_article_rewards") + mapOf(
-            "settings_schema" to 1,
-            "hide_event_calendar" to true,
-        )
+        storage.values = legacy
 
         val failed = store.reload()
 
@@ -151,7 +150,7 @@ class SettingsStoreTest {
         storage.keepOldValues = false
         val recovered = store.reload().settings!!
         assertFalse(recovered.raw(Toggle.AD_CARDS))
-        assertEquals(2L, recovered.revision)
+        assertEquals(42L, recovered.revision)
         assertEquals(storage.writes.first(), storage.writes.last())
         assertFalse(storage.values.containsKey("hide_event_calendar"))
     }
@@ -221,10 +220,10 @@ class SettingsStoreTest {
             legacy + ("settings_revision" to 41),
             legacy + ("settings_writer_id" to "invalid"),
             legacy + ("auto_refresh_minutes" to 3),
-            legacy + ("settings_schema" to 3),
+            legacy + ("settings_schema" to 4),
             current - "hide_article_rewards",
             current + ("hide_article_rewards" to "false"),
-            current + ("settings_schema" to 3),
+            current + ("settings_schema" to 4),
         )
         invalid.forEach { snapshot ->
             val storage = MemoryStorage(snapshot)
@@ -250,7 +249,7 @@ class SettingsStoreTest {
         assertEquals(42L, state.settings!!.revision)
         assertFalse(state.settings!!.raw(Toggle.MASTER))
         assertEquals(10, state.settings!!.autoRefreshMinutes)
-        assertEquals(2, storage.values["settings_schema"])
+        assertEquals(3, storage.values["settings_schema"])
         assertFalse(storage.values.containsKey("hide_event_calendar"))
         assertEquals(1, storage.writes.size)
     }
@@ -263,7 +262,7 @@ class SettingsStoreTest {
         val state = storage.store().setToggle(Toggle.ARTICLE_REWARDS, true)
 
         val expected = (legacy - "hide_event_calendar") + mapOf(
-            "settings_schema" to 2,
+            "settings_schema" to 3,
             "settings_revision" to 42L,
             "hide_article_rewards" to true,
         )

@@ -1,104 +1,124 @@
 package io.github.ghsssss.ithomeadkill.settings
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
+import io.github.libxposed.service.XposedService
+import java.util.IdentityHashMap
 import java.util.concurrent.Executors
 
-/** UI 只持有本地保存状态；此类不探测或声称宿主已激活。 */
+/** UI state confirms framework persistence, never claims host hooks are active. */
 class SettingsRepository(context: Context) {
     private val applicationContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private val lifecycleLock = Any()
     private var closed = false
-    private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "ITHomeSettings")
-    }
+    private val executor = Executors.newSingleThreadExecutor { Thread(it, "ITHomeSettings") }
     private val mutableState = mutableStateOf(SettingsState())
     val state: State<SettingsState> = mutableState
-
-    // 首次打开、加载与写入都发生在同一个 IO 队列，不在主线程等待 SharedPreferences。
-    private val preferences by lazy(LazyThreadSafetyMode.NONE) {
-        // LSPosed's official legacy shared-preference extension owns the path
-        // and permissions. Without it, keep the settings UI usable privately;
-        // the host then fails open instead of performing chmod or custom IPC.
-        @Suppress("DEPRECATION")
-        try {
-            applicationContext.getSharedPreferences(SettingsContract.PREFS_NAME, Context.MODE_WORLD_READABLE)
-        } catch (_: SecurityException) {
-            applicationContext.getSharedPreferences(SettingsContract.PREFS_NAME, Context.MODE_PRIVATE)
-        }
-    }
-    private val store = SettingsStore(
-        state = sharedStoreState,
-        read = { preferences.all },
-        commit = { values ->
-            val editor = preferences.edit().clear()
-            values.forEach { (key, value) ->
-                when (value) {
-                    is Boolean -> editor.putBoolean(key, value)
-                    is Int -> editor.putInt(key, value)
-                    is Long -> editor.putLong(key, value)
-                    is String -> editor.putString(key, value)
-                    else -> error("Unsupported settings value for $key")
-                }
-            }
-            editor.commit()
-        },
-    )
+    private val connectionChanged: () -> Unit = { reload() }
 
     init {
+        FrameworkConnection.subscribe(connectionChanged)
+        FrameworkConnection.start()
         reload()
     }
 
-    fun setToggle(toggle: Toggle, value: Boolean) {
-        enqueue { store.setToggle(toggle, value) }
-    }
-
-    fun setRefreshMinutes(minutes: Int) {
-        enqueue { store.setRefreshMinutes(minutes) }
-    }
-
-    fun reload() {
-        enqueue { store.reload() }
-    }
+    fun setToggle(toggle: Toggle, value: Boolean) = enqueue { it.setToggle(toggle, value) }
+    fun setRefreshMinutes(minutes: Int) = enqueue { it.setRefreshMinutes(minutes) }
+    fun reload() = enqueue { it.reload() }
 
     fun close() {
         synchronized(lifecycleLock) {
             if (closed) return
             closed = true
+            FrameworkConnection.unsubscribe(connectionChanged)
             mainHandler.removeCallbacksAndMessages(null)
-            // 不 interrupt 已接受的写入，也不遗弃队列；只停止新的任务与 UI 发布。
+            // Already accepted writes finish; destroyed pages cannot publish.
             executor.shutdown()
         }
     }
 
-    private fun enqueue(operation: () -> SettingsState) {
+    private fun store(service: XposedService): SettingsStore {
+        val backend = synchronized(backends) {
+            backends[service] ?: Backend(service.getRemotePreferences(SettingsContract.PREFS_NAME)).also {
+                backends[service] = it
+            }
+        }
+        fun requireSession() {
+            check(FrameworkConnection.selected() === service) { "框架连接已变化，请重试" }
+        }
+        return SettingsStore(
+            state = backend.state,
+            read = {
+                requireSession()
+                val remote = backend.preferences.all
+                // A nonempty remote profile is authoritative, including invalid
+                // data which the strict codec must reject rather than overwrite.
+                if (remote.isNotEmpty()) remote
+                else LegacySettingsExport.read(applicationContext) ?: emptyMap<String, Any>()
+            },
+            commit = { values ->
+                requireSession()
+                val editor = backend.preferences.edit().clear()
+                values.forEach { (key, value) ->
+                    when (value) {
+                        is Boolean -> editor.putBoolean(key, value)
+                        is Int -> editor.putInt(key, value)
+                        is Long -> editor.putLong(key, value)
+                        is String -> editor.putString(key, value)
+                        else -> error("Unsupported settings value for $key")
+                    }
+                }
+                // service 102 updates its memory snapshot before the Binder
+                // commit. A matching read alone is not persistence evidence;
+                // SettingsStore retains shared pending confirmation on false.
+                editor.commit().also { requireSession() }
+            },
+        )
+    }
+
+    private fun enqueue(operation: (SettingsStore) -> SettingsState) {
         synchronized(lifecycleLock) {
             if (closed) return
             executor.execute {
-                publish(SettingsState(store.settings, "正在读取或保存本机设置", busy = true))
-                publish(operation())
+                val service = FrameworkConnection.selected()
+                if (service == null) {
+                    publish(SettingsState(null,
+                        "未连接到唯一可用的 API 102 框架，请启用模块后重新打开设置。", busy = false))
+                    return@execute
+                }
+                publish(SettingsState(mutableState.value.settings, "正在读取或保存框架设置", busy = true))
+                val next = try {
+                    operation(store(service))
+                } catch (error: Exception) {
+                    SettingsState(null, "框架设置暂不可用：${error.javaClass.simpleName}", busy = false)
+                }
+                if (FrameworkConnection.selected() === service) publish(next)
+                else publish(SettingsState(null, "框架连接已变化，请重新载入。", busy = false))
             }
         }
-    }
-
-    private companion object {
-        // 本进程只有这一个设置文件；页面重建不能丢弃尚未确认的提交。
-        val sharedStoreState = SettingsStoreState()
     }
 
     private fun publish(next: SettingsState) {
         synchronized(lifecycleLock) {
             if (closed) return
             mainHandler.post {
-                synchronized(lifecycleLock) {
-                    // 处理已经 post、随后 close 的竞态，销毁后不再变更 Compose State。
-                    if (!closed) mutableState.value = next
-                }
+                synchronized(lifecycleLock) { if (!closed) mutableState.value = next }
             }
         }
+    }
+
+    private class Backend(val preferences: SharedPreferences) {
+        val state = SettingsStoreState()
+    }
+
+    private companion object {
+        // Confirmation survives page recreation and is never shared across
+        // different framework Binder identities.
+        val backends = IdentityHashMap<XposedService, Backend>()
     }
 }
