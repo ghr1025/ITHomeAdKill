@@ -185,7 +185,7 @@ jobs:
           # 草稿不会被 LSPosed 抓取，也不会被客户端看到，强制发布
           gh release edit "$MODULE_TAG" --repo "${MODULE_REPO}" --draft=false --notes-file notes.md
 
-      - name: Update updates.json
+      - name: Sync README and updates.json
         env:
           CHANGELOG_FILE: ${{ github.workspace }}/notes.md
         run: |
@@ -194,6 +194,8 @@ jobs:
           rm -rf modrepo
           git clone --depth 1 "https://github.com/${MODULE_REPO}.git" modrepo
           cd modrepo
+          # 模块仓库的 README 不会自动更新，这里与源码仓库保持一致
+          cp "${GITHUB_WORKSPACE}/README.md" README.md
           export TAG VERSION_CODE CHANGELOG_FILE
           # 下载地址必须用模块仓库的真实 tag（<versionCode>-<versionName>）
           export ZIP_URL="https://github.com/${MODULE_REPO}/releases/download/${MODULE_TAG}/ITHomeAdKill-${TAG}.apk"
@@ -224,9 +226,9 @@ jobs:
           p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
           print(json.dumps(data, ensure_ascii=False, indent=2))
           PY
-          git add updates.json
+          git add updates.json README.md
           if git diff --cached --quiet; then
-            echo "updates.json 无变化，跳过提交"
+            echo "README/updates.json 无变化，跳过提交"
           else
             git -c user.name="github-actions[bot]" \
                 -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
