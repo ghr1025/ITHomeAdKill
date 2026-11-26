@@ -15,8 +15,15 @@ android {
         applicationId = "io.github.ghsssss.ithomeadkill"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1-dev"
+        // 版本号来源优先级：-PverCode/-PverName > 环境变量 > 本地默认值
+        val vName = (project.findProperty("verName") as String?)
+            ?: System.getenv("VERSION_NAME")
+            ?: "1.1-dev"
+        val vCode = ((project.findProperty("verCode") as String?)
+            ?: System.getenv("VERSION_CODE")
+            ?: "2").toInt()
+        versionName = vName
+        versionCode = vCode
     }
 
     buildTypes {
