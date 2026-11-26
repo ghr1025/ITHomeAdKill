@@ -132,6 +132,9 @@ jobs:
             gh release create "$TAG" dist/*.apk --repo "${GITHUB_REPOSITORY}" \
               --title "$TAG" --notes "CI 构建 ${GITHUB_SHA}" --latest
           fi
+          # 兜底：gh 在本环境可能创建为草稿，草稿的资产对匿名用户 404，
+          # 且不会被标为 Latest，这里强制发布并置为最新
+          gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --draft=false --latest
 
       - name: Publish to LSPosed module repo
         run: |
@@ -141,6 +144,8 @@ jobs:
             gh release create "$TAG" dist/*.apk --repo "${MODULE_REPO}" \
               --title "$TAG" --notes "CI 构建 ${GITHUB_SHA}"
           fi
+          # 草稿不会被 LSPosed 抓取，也不会被客户端看到，强制发布
+          gh release edit "$TAG" --repo "${MODULE_REPO}" --draft=false
 
       - name: Update updates.json
         env:
