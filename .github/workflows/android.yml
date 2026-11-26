@@ -116,6 +116,11 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.MODULE_REPO_TOKEN }}
       TAG: ${{ github.ref_name }}
+      VERSION_CODE: ${{ needs.build.outputs.version-code }}
+      VERSION_NAME: ${{ needs.build.outputs.version-name }}
+      # 模块仓库的 tag 约定为 <versionCode>-<versionName>（如 1-1.0、10100-1.1），
+      # 用这个格式创建可避免被规范化改名后资产地址失效
+      MODULE_TAG: ${{ needs.build.outputs.version-code }}-${{ needs.build.outputs.version-name }}
     steps:
       # 需要完整历史与 tag 才能生成「自上个版本以来的提交」文案
       - uses: actions/checkout@v4
@@ -130,7 +135,9 @@ jobs:
       - name: Generate release notes
         run: |
           set -euo pipefail
-          PREV="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          # 必须排除当前 tag：重发同一版本时它会指向新提交，
+          # 用 HEAD^ 会匹配到自身，导致文案范围为空
+          PREV="$(git describe --tags --abbrev=0 --exclude="${TAG}" HEAD 2>/dev/null || true)"
           if [[ -n "${PREV}" ]]; then
             RANGE="${PREV}..HEAD"
             echo "提交范围: ${RANGE}"
@@ -169,37 +176,47 @@ jobs:
 
       - name: Publish to LSPosed module repo
         run: |
-          if gh release view "$TAG" --repo "${MODULE_REPO}" > /dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.apk --repo "${MODULE_REPO}" --clobber
+          if gh release view "$MODULE_TAG" --repo "${MODULE_REPO}" > /dev/null 2>&1; then
+            gh release upload "$MODULE_TAG" dist/*.apk --repo "${MODULE_REPO}" --clobber
           else
-            gh release create "$TAG" dist/*.apk --repo "${MODULE_REPO}" \
+            gh release create "$MODULE_TAG" dist/*.apk --repo "${MODULE_REPO}" \
               --title "$TAG" --notes-file notes.md
           fi
           # 草稿不会被 LSPosed 抓取，也不会被客户端看到，强制发布
-          gh release edit "$TAG" --repo "${MODULE_REPO}" --draft=false --notes-file notes.md
+          gh release edit "$MODULE_TAG" --repo "${MODULE_REPO}" --draft=false --notes-file notes.md
 
       - name: Update updates.json
         env:
-          VERSION_CODE: ${{ needs.build.outputs.version-code }}
+          CHANGELOG_FILE: ${{ github.workspace }}/notes.md
         run: |
           set -euo pipefail
           gh auth setup-git
           rm -rf modrepo
           git clone --depth 1 "https://github.com/${MODULE_REPO}.git" modrepo
           cd modrepo
-          export TAG VERSION_CODE
-          export ZIP_URL="https://github.com/${MODULE_REPO}/releases/download/${TAG}/ITHomeAdKill-${TAG}.apk"
+          export TAG VERSION_CODE CHANGELOG_FILE
+          # 下载地址必须用模块仓库的真实 tag（<versionCode>-<versionName>）
+          export ZIP_URL="https://github.com/${MODULE_REPO}/releases/download/${MODULE_TAG}/ITHomeAdKill-${TAG}.apk"
           python3 - <<'PY'
           import json, os, pathlib
 
           p = pathlib.Path("updates.json")
           data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"updates": []}
           code = int(os.environ["VERSION_CODE"])
+          # changelog 用与 Release 相同的提交文案
+          notes = ""
+          cf = os.environ.get("CHANGELOG_FILE")
+          if cf and pathlib.Path(cf).exists():
+              lines = [l.strip() for l in pathlib.Path(cf).read_text(encoding="utf-8").splitlines()]
+              notes = "\n".join(
+                  l for l in lines
+                  if l and not l.startswith("## ") and not l.startswith("完整变更")
+              )
           item = {
               "version": os.environ["TAG"],
               "versionCode": code,
               "zipUrl": os.environ["ZIP_URL"],
-              "changelog": f"CI 构建 {os.environ.get('GITHUB_SHA', '')}",
+              "changelog": notes or f"CI 构建 {os.environ.get('GITHUB_SHA', '')}",
           }
           items = [u for u in data.get("updates", []) if u.get("versionCode") != code]
           items.append(item)
