@@ -65,9 +65,17 @@ jobs:
           CORE="${VERSION_NAME%%-*}"
           IFS='.' read -r MAJ MIN PAT <<< "${CORE}"
           VERSION_CODE=$(( ${MAJ:-0}*10000 + ${MIN:-0}*100 + ${PAT:-0} ))
+          # 注意：PR 触发的 github.ref 是 refs/pull/2/merge，ref_name 会带斜杠，
+          # 不能直接拼文件名，统一用版本号命名
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            APK_NAME="ITHomeAdKill-${GITHUB_REF_NAME}.apk"
+          else
+            APK_NAME="ITHomeAdKill-${VERSION_NAME}.apk"
+          fi
           echo "name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
           echo "code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
-          echo "版本: ${VERSION_NAME} (${VERSION_CODE})"
+          echo "apk=${APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "版本: ${VERSION_NAME} (${VERSION_CODE}) -> ${APK_NAME}"
 
       - name: Build debug APK
         run: >-
@@ -78,8 +86,8 @@ jobs:
       - name: Rename APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk \
-             "dist/ITHomeAdKill-${{ github.ref_name }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/${{ steps.ver.outputs.apk }}"
+          ls -l dist
 
       - name: Verify versionCode in APK
         run: |
