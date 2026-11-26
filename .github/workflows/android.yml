@@ -1,8 +1,8 @@
 name: Build & Publish
 
 on:
+  # 只在打版本 tag 时构建发布；日常推 master 不再触发，PR 仍会验证编译
   push:
-    branches: [master]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
