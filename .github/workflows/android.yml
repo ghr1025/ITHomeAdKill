@@ -117,10 +117,40 @@ jobs:
       GH_TOKEN: ${{ secrets.MODULE_REPO_TOKEN }}
       TAG: ${{ github.ref_name }}
     steps:
+      # 需要完整历史与 tag 才能生成「自上个版本以来的提交」文案
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           name: ITHomeAdKill
           path: dist
+
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          PREV="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          if [[ -n "${PREV}" ]]; then
+            RANGE="${PREV}..HEAD"
+            echo "提交范围: ${RANGE}"
+          else
+            RANGE="HEAD"
+            echo "未找到上一个 tag，使用全量提交"
+          fi
+          {
+            echo "## 更新内容"
+            echo
+            # 过滤掉 CI 自身的提交，只保留功能/文档类改动
+            git log --no-merges --pretty=format:'- %s' "${RANGE}" | grep -v -- '^- ci: ' || true
+            echo
+            if [[ -n "${PREV}" ]]; then
+              echo
+              echo "完整变更: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            fi
+          } > notes.md
+          echo '--- notes.md ---'
+          cat notes.md
 
       - name: Publish to own repo
         env:
@@ -130,11 +160,12 @@ jobs:
             gh release upload "$TAG" dist/*.apk --repo "${GITHUB_REPOSITORY}" --clobber
           else
             gh release create "$TAG" dist/*.apk --repo "${GITHUB_REPOSITORY}" \
-              --title "$TAG" --notes "CI 构建 ${GITHUB_SHA}" --latest
+              --title "$TAG" --notes-file notes.md --latest
           fi
           # 兜底：gh 在本环境可能创建为草稿，草稿的资产对匿名用户 404，
-          # 且不会被标为 Latest，这里强制发布并置为最新
-          gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --draft=false --latest
+          # 且不会被标为 Latest，这里强制发布并用提交文案覆盖说明
+          gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --draft=false --latest \
+            --notes-file notes.md
 
       - name: Publish to LSPosed module repo
         run: |
@@ -142,10 +173,10 @@ jobs:
             gh release upload "$TAG" dist/*.apk --repo "${MODULE_REPO}" --clobber
           else
             gh release create "$TAG" dist/*.apk --repo "${MODULE_REPO}" \
-              --title "$TAG" --notes "CI 构建 ${GITHUB_SHA}"
+              --title "$TAG" --notes-file notes.md
           fi
           # 草稿不会被 LSPosed 抓取，也不会被客户端看到，强制发布
-          gh release edit "$TAG" --repo "${MODULE_REPO}" --draft=false
+          gh release edit "$TAG" --repo "${MODULE_REPO}" --draft=false --notes-file notes.md
 
       - name: Update updates.json
         env:
